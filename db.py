@@ -8,13 +8,6 @@ import os
 import json
 import shutil
 
-# להריץ טסט מסוים:
-# py.test -k test_name
-# להריץ עם מדידת זמן:
-# pytest --durations=8
-# להריץ את כל הטסטים:
-# py.test
-
 
 @dataclass_json
 @dataclass
@@ -22,9 +15,9 @@ class DBField(DBField):
     name: str
     type: Type
 
-    def __init__(self, name, type):
+    def __init__(self, name, type_):
         self.name = name
-        self.type = type
+        self.type = type_
 
 
 @dataclass_json
@@ -40,6 +33,20 @@ class SelectionCriteria(SelectionCriteria):
         self.value = value
 
 
+def get_str(param, operator, value):
+    if isinstance(param, str):
+        result = f"\"{param}\"" + operator
+    else:
+        result = str(param) + operator
+
+    if isinstance(value, str):
+        return result + f"\"{value}\""
+    else:
+        return result + str(value)
+
+    # return f"\"{param[:-1]}\"" + operator + f"\"{value}\""
+
+
 @dataclass_json
 @dataclass
 class DBTable(DBTable):
@@ -47,9 +54,9 @@ class DBTable(DBTable):
     fields: List[DBField]
     key_field_name: str
 
-    def __init__(self, name, fields, key_field_name):
-        if key_field_name not in [filed.name for filed in fields]:
-            raise KeyError
+    def __init__(self, name: str, fields: List[DBField], key_field_name: str):
+        if key_field_name not in [field.name for field in fields]:
+            raise ValueError
         self.key_field_name = key_field_name
         self.fields = fields
         self.name = name
@@ -131,46 +138,46 @@ class DBTable(DBTable):
                 return
             num += 1
 
-    def delete_operator(self, criteria: SelectionCriteria):
-        count = 0
-        num = 1
-        while os.path.isfile(f"{DB_ROOT}/{self.name}/{self.name}{num}.json"):
-            with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", encoding='utf-8') as f:
-                my_data = json.load(f)
+        raise ValueError
 
-            deleted_keys = []
+    def get_operation(self, criteria: List[SelectionCriteria], key, row):
+        fields = [field.name for field in self.fields]
+        operation = ""
+        for criterion in criteria:
+            if criterion.operator == "=":
+                criterion.operator = "=="
 
-            for key, row in my_data.items():
-                if criteria.field_name == self.key_field_name:
-                    if key == criteria.value:
-                        deleted_keys.append(key)
-                        count += 1
+            if criterion.field_name == self.key_field_name:
+                key_type = [field.type for field in self.fields if self.key_field_name == field.name][0]
+                if isinstance(key_type, str):
+                    operation += get_str(key, criterion.operator, criterion.value) + " and "
+                # TODO: int
+                #  operation += get_str(get_type(key_type)(key), criterion.operator, criterion.value)
 
                 else:
-                    fields = [field.name for field in self.fields]
-                    if criteria.field_name in fields:
-                        if row[criteria.field_name] == criteria.value:
-                            deleted_keys.append(key)
-                            count += 1
+                    operation += get_str(int(key), criterion.operator, criterion.value) + " and "
 
-            for key in deleted_keys:
-                my_data.pop(key)
+            else:
+                if criterion.field_name in fields:
+                    operation += get_str(row[criterion.field_name], criterion.operator, criterion.value) + " and "
 
-            with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", "w", encoding='utf-8') as file:
-                json.dump(my_data, file, ensure_ascii=False)
-
-            num += 1
-
-        self.add_count(-count)
+        return operation[:-4]
 
     def delete_records(self, criteria: List[SelectionCriteria]) -> None:
-        for condition in criteria:
-            if condition.operator == "=":
-                self.delete_operator(condition)
-            # if condition.operator == ">":
-            #     self.delete_small(condition)
-            # if condition.operator == "<":
-            #     self.delete_big(condition)
+        num = 1
+
+        with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", encoding='utf-8') as f:
+            my_data = json.load(f)
+
+        count = 0
+        deleted_keys = []
+
+        for key, item in my_data.items():
+            if eval(self.get_operation(criteria, key, item)):
+                deleted_keys.append(key)
+                count += 1
+
+        self.add_count(-count)
 
     # TODO: ijson
     def get_record(self, key: Any) -> Dict[str, Any]:
@@ -207,7 +214,20 @@ class DBTable(DBTable):
     def query_table(self, criteria: List[SelectionCriteria]) \
             -> List[Dict[str, Any]]:
         result = []
-        return []
+        num = 1
+        while os.path.isfile(f"{DB_ROOT}/{self.name}/{self.name}{num}.json"):
+            with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", encoding='utf-8') as f:
+                my_data = json.load(f)
+
+            for key, value in my_data.items():
+                if eval(self.get_operation(criteria, key, value)):
+                    new_data = {self.key_field_name: key}
+                    new_data.update(value)
+                    result.append(new_data)
+
+                num += 1
+
+        return result
 
     def create_index(self, field_to_index: str) -> None:
         raise NotImplementedError
@@ -236,14 +256,20 @@ class DataBase(DataBase):
                      fields: List[DBField],
                      key_field_name: str) -> DBTable:
         if not os.path.isdir(f"{DB_ROOT}/{table_name}"):
-            os.makedirs(f"{DB_ROOT}/{table_name}")
-            new_table = DBTable(table_name, fields, key_field_name)
+            try:
+                os.makedirs(f"{DB_ROOT}/{table_name}")
+                new_table = DBTable(table_name, fields, key_field_name)
 
-            with open(f"{DB_ROOT}/{table_name}/{table_name}.json", "w") as tables:
-                json.dump({"len": 0,
-                           "name": table_name,
-                           "filed": [{field.name: str(field.type)} for field in fields],
-                           "key_field_name": key_field_name}, tables)
+                with open(f"{DB_ROOT}/{table_name}/{table_name}.json", "w") as tables:
+                    json.dump({"len": 0,
+                               "name": table_name,
+                               "fields": [{field.name: str(field.type)} for field in fields],
+                               "key_field_name": key_field_name}, tables)
+
+            except ValueError:
+                self.delete_table(table_name)
+                raise ValueError
+
             self.my_tables.update({table_name: new_table})
             return new_table
 
@@ -260,7 +286,7 @@ class DataBase(DataBase):
             with open(f"{DB_ROOT}/{table_name}/{table_name}.json") as tables:
                 table_data = json.load(tables)
                 new_table = DBTable(table_data["name"],
-                                    [DBField(key, get_type(data)) for key, data in table_data["filed"].items()],
+                                    [DBField(list(item.keys())[0], list(item.values())[0]) for item in table_data["fields"]],
                                     table_data["key_field_name"])
                 self.my_tables[table_name] = new_table
                 return new_table
@@ -284,30 +310,11 @@ class DataBase(DataBase):
         raise NotImplementedError
 
 
+# db = DataBase()
+#
+# p = db.get_table("person")
+#
+# p.update_record(4, {"age": 5})
 
 
-
-def delete_records(self, criteria: List[SelectionCriteria]) -> None:
-    num_of_removed = 0
-    with open(f"db_files/{self.name}.csv", "r") as csv_file:
-        csv_reader = csv.reader(csv_file)
-        clean_rows = []
-        for record in csv_reader:
-            operation = ""
-            for criterion in criteria:
-                index_of_field = self.get_index_of_field(criterion.field_name)
-                operation += record[index_of_field] + criterion.operator + str(criterion.value) + " and "
-            if not eval(operation[:-4]):
-                clean_rows.append(record)
-            else:
-                num_of_removed += 1
-    with open(f"db_files/{self.name}.csv", "w") as csv_file:
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerows(clean_rows)
-    # update the info of the table
-    with open("db_files/table_info.json", "r") as json_file:
-        json_data = json.load(json_file)
-    json_data[self.name]["count"] -= num_of_removed
-    with open("db_files/table_info.json", "w") as json_file:
-        json.dump(json_data, json_file)
 
